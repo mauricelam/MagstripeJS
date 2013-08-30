@@ -1,163 +1,240 @@
 (function () {
 
-    var analyzer;
     var processNode;
-    var buffer = new Uint8Array(1024);
-    var frequencies = new Float32Array(1024);
-    var rID;
     var decodeTimer;
-    var decodeBuffer = [];
+    var swipeBuffer = [];
 
     function onFail() {
         alert('Please allow access to the microphone.');
     }
 
-    var context = new window.webkitAudioContext();
+    var context = new AudioContext();
 
     navigator.webkitGetUserMedia({audio: true}, function(stream) {
         var mic = context.createMediaStreamSource(stream);
         processNode = context.createScriptProcessor(1024, 1, 1);
         processNode.onaudioprocess = analyze;
-        analyzer = context.createAnalyser();
-        analyzer.fftSize = 2048;
-        analyzer.smoothingTimeConstant = 0.2;
-        mic.connect(analyzer);
-        analyzer.connect(processNode);
+        mic.connect(processNode);
         processNode.connect(context.destination);
+        activeMonitor();
         console.log('ready');
     }, onFail);
 
-    var THRESHOLD = 6;
+    // Do not process if in background
+    
+    var activeTimer;
+    var activeMonitor = function() {
+        processNode.onaudioprocess = analyze;
+        window.clearTimeout(activeTimer);
+        activeTimer = window.setTimeout(function() {
+            processNode.onaudioprocess = null;
+        }, 1000);
+        window.requestAnimationFrame(activeMonitor);
+    };
 
+    // Plotting functions
+
+    var plotData = {
+        points: [],
+        graphs: []
+    };
+
+    function replot(offset) {
+        offset = offset || 0;
+        var canvas = document.getElementById('canvas');
+        canvas.width = canvas.width;
+        var canvasCtx = canvas.getContext('2d');
+        plotData.points.forEach(function(point) {
+            canvasCtx.fillStyle = point.color;
+            for (i = 0; i < point.data.length; i++) {
+                var x = point.data[i];
+                var y = point.y;
+                if (point.y === null) {
+                    y = x[1] * 1000 + 256;
+                    x = x[0];
+                }
+                var size = point.size || 3;
+                canvasCtx.fillRect(x - offset, y, size, size);
+            }
+        });
+        plotData.graphs.forEach(function(graph) {
+            canvasCtx.strokeStyle = graph.color;
+            canvasCtx.fillStyle = graph.color;
+            canvasCtx.moveTo(0, 256);
+            canvasCtx.lineTo(999999, 256);
+            canvasCtx.stroke();
+            canvasCtx.moveTo(0, graph.data[0] * 1000 + 256);
+            for (var i = 1; i < graph.data.length; i++) {
+                canvasCtx.lineTo(i - offset, graph.data[i] * 1000 + 256);
+                // canvasCtx.fillRect(i - offset, graph.data[i] * 1000 + 256, 2, 2);
+            }
+            canvasCtx.stroke();
+        });
+    }
+
+    function plotPoints(arr, y, color, size) {
+        plotData.points.push({data: arr, y: y, color: color, size: size});
+        replot();
+    }
+
+    function plot(arr, color) {
+        plotData.graphs.push({data: arr, color: color});
+        replot();
+    }
+
+    window.addEventListener('scroll', function(event) {
+        replot(document.body.scrollLeft);
+    }, false);
+
+    // Decoding
+
+    var THRESHOLD = 0.01;
 
     function findZeroCrossings(buffer) {
-        var lastCrossing = 0;
         var positive = false;
         var arr = [];
         for (var i = 0; i < buffer.length; i++) {
-            if (!positive && buffer[i] > 128 + THRESHOLD) {
+            if (!positive && buffer[i] > THRESHOLD) {
                 positive = true;
-                arr.push(i - lastCrossing);
-                lastCrossing = i;
-            } else if (positive && buffer[i] < 128 - THRESHOLD) {
+                arr.push(i);
+            } else if (positive && buffer[i] < -THRESHOLD) {
                 positive = false;
-                arr.push(i - lastCrossing);
-                lastCrossing = i;
+                arr.push(i);
             }
         }
         return arr;
     }
 
-    function isUseful(buffer) {
-        for (var i = 0; i < 1024; i++) {
-            if (!positive && buffer[i] > 128 + THRESHOLD) {
-                return true;
-            } else if (positive && buffer[i] < 128 - THRESHOLD) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function clear() {
-        var canvas = document.getElementById('canvas');
-        canvas.width = canvas.width;
-    }
-
-
-    function plot(arr, color) {
-        var canvas = document.getElementById('canvas');
-        var canvasCtx = canvas.getContext('2d');
-        canvasCtx.strokeStyle = color;
-        canvasCtx.moveTo(0, 256);
-        canvasCtx.lineTo(999999, 256);
-        canvasCtx.stroke();
-        canvasCtx.moveTo(0, arr[0] * 2);
-        for (var i = 1; i < arr.length; i++) {
-            canvasCtx.lineTo(i, arr[i] * 2);
-        }
-        canvasCtx.stroke();
-    }
+    var TRACK2_SIZE = 5;
+    var TRACK2_ASCII = 48;
+    var TRACK1_SIZE = 7;
+    var TRACK1_ASCII = 32;
 
     function decode(decodeBuffer) {
         console.log('decode', decodeBuffer);
         var decoded = [];
         var unknown = 0;
-        var avgArray = new AverageArray20();
+        var avgArray = new AverageArray();
+        var zeroes = [], ones = [], unknowns = [];
         for (var i = 1; i < decodeBuffer.length; i++) {
-            var average = avgArray.reduce(function(acc, cur) { return acc + cur; }, 0) / avgArray.length;
-            var t = decodeBuffer[i];
-            if (Math.abs(t - average) < average * 0.2) {
+            var average = avgArray.average();
+            var base = decodeBuffer[i-1];
+            var t = decodeBuffer[i] - base;
+            var t2 = decodeBuffer[i+1] - base;
+            if (i < 10) {
+                if (i > 5) avgArray.add(t);
+                continue;
+            }
+            if (Math.abs(t - average) < average * 0.3) {
                 decoded.push(0);
                 avgArray.add(t);
-            } else if (Math.abs(t * 2 - average) < average * 0.2) {
+                zeroes.push(decodeBuffer[i]);
+            } else if (Math.abs(t2 - average) < average * 0.3) {
                 decoded.push(1);
-                avgArray.add(t * 2);
+                avgArray.add(t2);
+                ones.push(decodeBuffer[i]);
                 i++;
             } else {
-                // console.log('unknown', t, average);
                 unknown++;
-                avgArray.add(t);
+                unknowns.push(decodeBuffer[i]);
             }
-            avgArray.push(decodeBuffer[i]);
         }
-        // console.log(decoded, 'unknown: ', unknown);
+        console.log('unknown: ', unknown);
 
-        decoded = decoded.slice(decoded.indexOf(1));
+        decoded.splice(0, decoded.indexOf(1));
+        decoded.reverse();
+        decoded.splice(0, decoded.indexOf(1));
+
+        var track = getTrack(decoded);
+        if (!track) {
+            track = getTrack(decoded.reverse());
+        }
+        console.log('track:', track);
+        if (!track) {
+            console.warn('Unknown track. Try swiping again');
+            return 'Bad swipe :(';
+        }
+
+        var text = toASCII(decoded, track);
+
+        plotPoints(zeroes, 300, 'cyan', 10);
+        plotPoints(ones, 200, 'orange', 10);
+        plotPoints(unknowns, 100, 'grey', 10);
+
+        return text;
+    }
+
+    function getTrack(bitArray) {
+        var bitString = bitArray.join('');
+        var t1_percent = bitString.indexOf('1010001');
+        var t1_questionMark = bitString.indexOf('1111100');
+        if (t1_percent > -1 && t1_questionMark > t1_percent) {
+            return 1;
+        }
+        var t2_semicolon = bitString.indexOf('11010');
+        var t2_questionMark = bitString.indexOf('11111');
+        if (t2_semicolon > -1 && t2_questionMark > t2_semicolon) {
+            return 2;
+        }
+    }
+
+    function toASCII(bitArray, track) {
+        var bitsize = track === 1 ? TRACK1_SIZE : TRACK2_SIZE;
+        var asciiOffset = track === 1 ? TRACK1_ASCII : TRACK2_ASCII;
         var groups = [];
-        for (var i = 0; i < decoded.length; i += 5) {
-            groups.push(decoded.slice(i, i+5).join(''));
+        for (var i = 0; i < bitArray.length; i += bitsize) {
+            groups.push(bitArray.slice(i, i + bitsize).reverse().join(''));
         }
-        var text = groups.map(function(group) {
-            var bin = group.substr(0, group.length - 1);
-            return String.fromCharCode(parseInt(bin, 2) + 48);
+        var decs = groups.map(function(group) {
+            if (!checkParity(group)) {
+                console.warn('Parity not matched');
+            }
+            return parseInt(group.substr(1), 2);
         });
+        return decs.map(function(dec) { return String.fromCharCode(dec + asciiOffset); }).join('');
+    }
 
-        return [groups, text.join('')];
+    function checkParity(group) {
+        var ones = 0;
+        for (var i = 0; i < group.length; i++) {
+            if (group[i] == 1) ones++;
+        }
+        return ones % 2 === 1;
     }
 
     function onSwipe() {
-        window.mmm = master;
-        console.log('onswipe', master);
-        var masterZxing = findZeroCrossings(master);
-        window.zmm = masterZxing;
-        var decoded = decode(masterZxing);
-        document.getElementById('message').innerHTML = decoded[0].join('');
-        document.getElementById('text').innerHTML = decoded[1];
-        master = [];
-        recording = false;
+        console.log('onswipe');
+        plot(swipeBuffer, 'red');
+        var zeroCrossings = findZeroCrossings(swipeBuffer);
+        plotPoints(zeroCrossings, 256, 'green');
+        document.getElementById('text').innerHTML = decode(zeroCrossings);
+        swipeBuffer = [];
     }
 
-    var master = [];
-    var recording = false;
 
     function analyze(event) {
-        if (analyzer) {
-            analyzer.getByteTimeDomainData(buffer);
-            // analyzer.getFloatFrequencyData(frequencies);
-            if (recording) {
-                master = master.concat([].slice.call(buffer));
-            }
-            if (findZeroCrossings(buffer).length) {
-                recording = true;
-                window.clearTimeout(decodeTimer);
-                decodeTimer = window.setTimeout(onSwipe, 1000);
-                master = master.concat([].slice.call(buffer));
-            }
+        var buffer = event.inputBuffer.getChannelData(0);
+        if (findZeroCrossings(buffer).length) {
+            window.clearTimeout(decodeTimer);
+            decodeTimer = window.setTimeout(onSwipe, 1000);
+            swipeBuffer = swipeBuffer.concat([].slice.call(buffer));
         }
-        // rID = window.requestAnimationFrame(analyze);
     }
 
 })();
 
-function AverageArray20() {}
+function AverageArray() {}
 
 var AVERAGE_SIZE = 5;
 
-AverageArray20.prototype = [];
-AverageArray20.prototype.add = function (value) {
+AverageArray.prototype = [];
+AverageArray.prototype.add = function(value) {
     if (this.length >= AVERAGE_SIZE) {
         this.splice(0, this.length - AVERAGE_SIZE + 1);
     }
     this.push(value);
+};
+
+AverageArray.prototype.average = function() {
+    return this.reduce(function(acc, cur) { return acc + cur; }, 0) / this.length;
 };
