@@ -10,7 +10,7 @@
 
     var context = new AudioContext();
 
-    navigator.webkitGetUserMedia({audio: true}, function(stream) {
+    navigator.getUserMedia({audio: true}, function(stream) {
         var mic = context.createMediaStreamSource(stream);
         processNode = context.createScriptProcessor(1024, 1, 1);
         processNode.onaudioprocess = analyze;
@@ -18,17 +18,18 @@
         processNode.connect(context.destination);
         activeMonitor();
         console.log('ready');
+        document.getElementById('text').innerHTML = 'ready';
     }, onFail);
 
     // Do not process if in background
     
     var activeTimer;
+    var clearAudioProcess = debounce(function() {
+        processNode.onaudioprocess = null;
+    }, 1000);
     var activeMonitor = function() {
         processNode.onaudioprocess = analyze;
-        window.clearTimeout(activeTimer);
-        activeTimer = window.setTimeout(function() {
-            processNode.onaudioprocess = null;
-        }, 1000);
+        clearAudioProcess();
         window.requestAnimationFrame(activeMonitor);
     };
 
@@ -165,6 +166,7 @@
     }
 
     function getTrack(bitArray) {
+        // Look for the start and end sentinels
         var bitString = bitArray.join('');
         var t1_percent = bitString.indexOf('1010001');
         var t1_questionMark = bitString.indexOf('1111100');
@@ -212,11 +214,11 @@
     }
 
 
+    var swipeDetect = debounce(onSwipe, 1000);
     function analyze(event) {
         var buffer = event.inputBuffer.getChannelData(0);
         if (findZeroCrossings(buffer).length) {
-            window.clearTimeout(decodeTimer);
-            decodeTimer = window.setTimeout(onSwipe, 1000);
+            swipeDetect();
             swipeBuffer = swipeBuffer.concat([].slice.call(buffer));
         }
     }
@@ -238,3 +240,11 @@ AverageArray.prototype.add = function(value) {
 AverageArray.prototype.average = function() {
     return this.reduce(function(acc, cur) { return acc + cur; }, 0) / this.length;
 };
+
+function debounce(func, delay) {
+    var timer;
+    return function() {
+        clearTimeout(timer);
+        timer = setTimeout(func, delay);
+    };
+}
